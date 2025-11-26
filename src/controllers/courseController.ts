@@ -134,6 +134,35 @@ export const allotCourse = async (req: Request, res: Response): Promise<void> =>
 
         const course = courseResult.Item;
 
+        // Check if course start date has passed
+        // Assuming start_date format is DDMMYYYY (e.g., "15062022")
+        /*         const startDateStr = course.start_date;
+                if (startDateStr && startDateStr.length === 8) {
+                    const day = parseInt(startDateStr.substring(0, 2));
+                    const month = parseInt(startDateStr.substring(2, 4)) - 1; // Month is 0-indexed in JS Date
+                    const year = parseInt(startDateStr.substring(4, 8));
+        
+                    const courseStartDate = new Date(year, month, day);
+                    const currentDate = new Date();
+        
+                    // Set time to midnight for date-only comparison
+                    courseStartDate.setHours(0, 0, 0, 0);
+                    currentDate.setHours(0, 0, 0, 0);
+        
+                    if (currentDate > courseStartDate) {
+                        res.status(400).json({
+                            status: 400,
+                            message: "COURSE_ALLOT_DATE_ERROR",
+                            data: {
+                                failure: {
+                                    Message: `Cannot allot course after start date. Course started on ${startDateStr}`
+                                }
+                            }
+                        });
+                        return;
+                    }
+                } */
+
         // Check if already allotted
         if (course.is_allotted) {
             res.status(400).json({
