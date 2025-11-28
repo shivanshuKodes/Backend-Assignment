@@ -2,13 +2,18 @@ import { Request, Response } from 'express';
 import { PutCommand, GetCommand, QueryCommand, UpdateCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import ddbDocClient from "../config/dynamoDB";
 import { generateCourseId, sortByRegistrationId } from "../utils/helpers";
-import { RegistrationStatus, CourseStatus, EntityType } from "../types/enums";
+import { RegistrationStatus, CourseStatus, EntityType } from "../constants/constants";
+import { isValidDateFormat, sanitizeInput, isEmptyAfterTrim, isValidCourseIdFormat } from "../utils/validators";
+import { handleControllerError } from "../constants/errorMessages";
 
 const TABLE_NAME = process.env.TABLE_NAME || "CourseManagementTable";
 
 /**
  * Add a new course offering
- * POST /add/courseOffering
+ * @route POST /add/courseOffering
+ * @param {Request} req - Express request with course details in body
+ * @param {Response} res - Express response
+ * @returns {Promise<void>}
  */
 export const addCourseOffering = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -29,6 +34,39 @@ export const addCourseOffering = async (req: Request, res: Response): Promise<vo
             return;
         }
 
+        // Sanitize string inputs
+        const sanitizedCourseName = sanitizeInput(course_name);
+        const sanitizedInstructorName = sanitizeInput(instructor_name);
+        const sanitizedStartDate = sanitizeInput(start_date);
+
+        // Check for empty strings after trimming
+        if (isEmptyAfterTrim(course_name) || isEmptyAfterTrim(instructor_name) || isEmptyAfterTrim(start_date)) {
+            res.status(400).json({
+                status: 400,
+                message: "INPUT_DATA_ERROR",
+                data: {
+                    failure: {
+                        Message: "course_name, instructor_name, and start_date cannot be empty or contain only whitespace"
+                    }
+                }
+            });
+            return;
+        }
+
+        // Validate that min_employees and max_employees are not negative
+        if (min_employees < 0 || max_employees < 0) {
+            res.status(400).json({
+                status: 400,
+                message: "INPUT_DATA_ERROR",
+                data: {
+                    failure: {
+                        Message: "min_employees and max_employees cannot be negative"
+                    }
+                }
+            });
+            return;
+        }
+
         // Validate min/max logic
         if (min_employees > max_employees) {
             res.status(400).json({
@@ -43,8 +81,69 @@ export const addCourseOffering = async (req: Request, res: Response): Promise<vo
             return;
         }
 
-        // Generate course ID
-        const course_id = generateCourseId(course_name, instructor_name);
+        // Validate date format
+        if (!isValidDateFormat(sanitizedStartDate)) {
+            res.status(400).json({
+                status: 400,
+                message: "INPUT_DATA_ERROR",
+                data: {
+                    failure: {
+                        Message: `Invalid date format. Expected DDMMYYYY with valid calendar date. Provided: ${sanitizedStartDate}`
+                    }
+                }
+            });
+            return;
+        }
+
+        // Validate start_date is not in the past
+        const day = parseInt(sanitizedStartDate.substring(0, 2));
+        const month = parseInt(sanitizedStartDate.substring(2, 4)) - 1; // Month is 0-indexed in JS Date
+        const year = parseInt(sanitizedStartDate.substring(4, 8));
+
+        const courseStartDate = new Date(year, month, day);
+        const currentDate = new Date();
+
+        // Set time to midnight for date only comparison
+        courseStartDate.setHours(0, 0, 0, 0);
+        currentDate.setHours(0, 0, 0, 0);
+
+        if (courseStartDate < currentDate) {
+            res.status(400).json({
+                status: 400,
+                message: "INPUT_DATA_ERROR",
+                data: {
+                    failure: {
+                        Message: `Cannot add course with past start date. Provided date: ${sanitizedStartDate}`
+                    }
+                }
+            });
+            return;
+        }
+
+        // Generate course ID using sanitized inputs
+        const course_id = generateCourseId(sanitizedCourseName, sanitizedInstructorName);
+
+        // Check if course already exists
+        const existingCourse = await ddbDocClient.send(new GetCommand({
+            TableName: TABLE_NAME,
+            Key: {
+                PK: `COURSE#${course_id}`,
+                SK: "METADATA"
+            }
+        }));
+
+        if (existingCourse.Item) {
+            res.status(400).json({
+                status: 400,
+                message: "DUPLICATE_COURSE_ERROR",
+                data: {
+                    failure: {
+                        Message: `Course with the same name and instructor already exists. Course ID: ${course_id}`
+                    }
+                }
+            });
+            return;
+        }
 
         // Save course to DynamoDB
         await ddbDocClient.send(new PutCommand({
@@ -53,9 +152,9 @@ export const addCourseOffering = async (req: Request, res: Response): Promise<vo
                 PK: `COURSE#${course_id}`,
                 SK: "METADATA",
                 course_id,
-                course_name,
-                instructor_name,
-                start_date,
+                course_name: sanitizedCourseName,
+                instructor_name: sanitizedInstructorName,
+                start_date: sanitizedStartDate,
                 min_employees,
                 max_employees,
                 current_count: 0,
@@ -74,23 +173,16 @@ export const addCourseOffering = async (req: Request, res: Response): Promise<vo
             }
         });
     } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : 'Unknown error occurred';
-        console.error('Error adding course:', message);
-        res.status(500).json({
-            status: 500,
-            message: "Error adding course",
-            data: {
-                failure: {
-                    Message: message
-                }
-            }
-        });
+        handleControllerError(error, res, "adding course");
     }
 };
 
 /**
  * Allot course to registered employees
- * POST /allot/:course_id
+ * @route PUT /allot/:course_id
+ * @param {Request} req - Express request with course_id in params
+ * @param {Response} res - Express response
+ * @returns {Promise<void>}
  */
 export const allotCourse = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -104,6 +196,20 @@ export const allotCourse = async (req: Request, res: Response): Promise<void> =>
                 data: {
                     failure: {
                         Message: "course_id cannot be empty"
+                    }
+                }
+            });
+            return;
+        }
+
+        // Validate course ID format
+        if (!isValidCourseIdFormat(course_id)) {
+            res.status(400).json({
+                status: 400,
+                message: "INPUT_DATA_ERROR",
+                data: {
+                    failure: {
+                        Message: `Invalid course ID format. Expected format: OFFERING-COURSENAME-INSTRUCTORNAME. Provided: ${course_id}`
                     }
                 }
             });
@@ -135,33 +241,33 @@ export const allotCourse = async (req: Request, res: Response): Promise<void> =>
         const course = courseResult.Item;
 
         // Check if course start date has passed
-        // Assuming start_date format is DDMMYYYY (e.g., "15062022")
-        /*         const startDateStr = course.start_date;
-                if (startDateStr && startDateStr.length === 8) {
-                    const day = parseInt(startDateStr.substring(0, 2));
-                    const month = parseInt(startDateStr.substring(2, 4)) - 1; // Month is 0-indexed in JS Date
-                    const year = parseInt(startDateStr.substring(4, 8));
-        
-                    const courseStartDate = new Date(year, month, day);
-                    const currentDate = new Date();
-        
-                    // Set time to midnight for date-only comparison
-                    courseStartDate.setHours(0, 0, 0, 0);
-                    currentDate.setHours(0, 0, 0, 0);
-        
-                    if (currentDate > courseStartDate) {
-                        res.status(400).json({
-                            status: 400,
-                            message: "COURSE_ALLOT_DATE_ERROR",
-                            data: {
-                                failure: {
-                                    Message: `Cannot allot course after start date. Course started on ${startDateStr}`
-                                }
-                            }
-                        });
-                        return;
+        // Assuming start_date format is DDMMYYYY ("15062022")
+        const startDateStr = course.start_date;
+        if (startDateStr && startDateStr.length === 8) {
+            const day = parseInt(startDateStr.substring(0, 2));
+            const month = parseInt(startDateStr.substring(2, 4)) - 1; // Month is 0-indexed in JS Date
+            const year = parseInt(startDateStr.substring(4, 8));
+
+            const courseStartDate = new Date(year, month, day);
+            const currentDate = new Date();
+
+            // Set time to midnight for date only comparison
+            courseStartDate.setHours(0, 0, 0, 0);
+            currentDate.setHours(0, 0, 0, 0);
+
+            if (currentDate > courseStartDate) {
+                res.status(400).json({
+                    status: 400,
+                    message: "COURSE_ALLOT_DATE_ERROR",
+                    data: {
+                        failure: {
+                            Message: `Cannot allot course after start date. Course started on ${startDateStr}`
+                        }
                     }
-                } */
+                });
+                return;
+            }
+        }
 
         // Check if already allotted
         if (course.is_allotted) {
@@ -274,16 +380,6 @@ export const allotCourse = async (req: Request, res: Response): Promise<void> =>
             }
         });
     } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : 'Unknown error occurred';
-        console.error('Error allotting course:', message);
-        res.status(500).json({
-            status: 500,
-            message: "Error allotting course",
-            data: {
-                failure: {
-                    Message: message
-                }
-            }
-        });
+        handleControllerError(error, res, "allotting course");
     }
 };

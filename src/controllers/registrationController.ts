@@ -2,13 +2,18 @@ import { Request, Response } from 'express';
 import { GetCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import ddbDocClient from "../config/dynamoDB";
 import { generateRegistrationId, extractCourseIdFromRegistration } from "../utils/helpers";
-import { RegistrationStatus, CancellationStatus, EntityType } from "../types/enums";
+import { RegistrationStatus, CancellationStatus, EntityType } from "../constants/constants";
+import { isValidEmail, sanitizeInput, isEmptyAfterTrim, isValidCourseIdFormat, isValidRegistrationIdFormat } from "../utils/validators";
+import { handleControllerError } from "../constants/errorMessages";
 
 const TABLE_NAME = process.env.TABLE_NAME || "CourseManagementTable";
 
 /**
  * Register an employee for a course
- * POST /add/register/:course_id
+ * @route POST /add/register/:course_id
+ * @param {Request} req - Express request with course_id in params, employee details in body
+ * @param {Response} res - Express response
+ * @returns {Promise<void>}
  */
 export const registerForCourse = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -23,6 +28,52 @@ export const registerForCourse = async (req: Request, res: Response): Promise<vo
                 data: {
                     failure: {
                         Message: "employee_name, email and course_id cannot be empty"
+                    }
+                }
+            });
+            return;
+        }
+
+        // Sanitize string inputs
+        const sanitizedEmployeeName = sanitizeInput(employee_name);
+        const sanitizedEmail = sanitizeInput(email);
+
+        // Check for empty strings after trimming
+        if (isEmptyAfterTrim(employee_name) || isEmptyAfterTrim(email)) {
+            res.status(400).json({
+                status: 400,
+                message: "INPUT_DATA_ERROR",
+                data: {
+                    failure: {
+                        Message: "employee_name and email cannot be empty or contain only whitespace"
+                    }
+                }
+            });
+            return;
+        }
+
+        // Validate email format
+        if (!isValidEmail(sanitizedEmail)) {
+            res.status(400).json({
+                status: 400,
+                message: "INPUT_DATA_ERROR",
+                data: {
+                    failure: {
+                        Message: `Invalid email format. Provided: ${sanitizedEmail}`
+                    }
+                }
+            });
+            return;
+        }
+
+        // Validate course ID format
+        if (!isValidCourseIdFormat(course_id)) {
+            res.status(400).json({
+                status: 400,
+                message: "INPUT_DATA_ERROR",
+                data: {
+                    failure: {
+                        Message: `Invalid course ID format. Expected format: OFFERING-COURSENAME-INSTRUCTORNAME. Provided: ${course_id}`
                     }
                 }
             });
@@ -53,6 +104,20 @@ export const registerForCourse = async (req: Request, res: Response): Promise<vo
 
         const course = courseResult.Item;
 
+        // Check if course is canceled (extra)
+        if (course.course_status === RegistrationStatus.COURSE_CANCELED) {
+            res.status(400).json({
+                status: 400,
+                message: "Course canceled",
+                data: {
+                    failure: {
+                        Message: "Cannot register for a canceled course"
+                    }
+                }
+            });
+            return;
+        }
+
         // Check if course is already allotted
         if (course.is_allotted) {
             res.status(400).json({
@@ -71,7 +136,7 @@ export const registerForCourse = async (req: Request, res: Response): Promise<vo
         const existingRegistration = await ddbDocClient.send(new GetCommand({
             TableName: TABLE_NAME,
             Key: {
-                PK: `EMPLOYEE#${email.toUpperCase()}`,
+                PK: `EMPLOYEE#${sanitizedEmail.toUpperCase()}`,
                 SK: `COURSE#${course_id}`
             }
         }));
@@ -104,7 +169,7 @@ export const registerForCourse = async (req: Request, res: Response): Promise<vo
         }
 
         // Generate registration ID
-        const registration_id = generateRegistrationId(employee_name, course_id);
+        const registration_id = generateRegistrationId(sanitizedEmployeeName, course_id);
 
         // Create registration (2 items for different access patterns + update count)
         await ddbDocClient.send(new TransactWriteCommand({
@@ -117,8 +182,8 @@ export const registerForCourse = async (req: Request, res: Response): Promise<vo
                             PK: `COURSE#${course_id}`,
                             SK: `REG#${registration_id}`,
                             registration_id,
-                            employee_name,
-                            email,
+                            employee_name: sanitizedEmployeeName,
+                            email: sanitizedEmail,
                             course_id,
                             status: RegistrationStatus.ACCEPTED,
                             created_at: new Date().toISOString(),
@@ -131,10 +196,10 @@ export const registerForCourse = async (req: Request, res: Response): Promise<vo
                     Put: {
                         TableName: TABLE_NAME,
                         Item: {
-                            PK: `EMPLOYEE#${email.toUpperCase()}`,
+                            PK: `EMPLOYEE#${sanitizedEmail.toUpperCase()}`,
                             SK: `COURSE#${course_id}`,
                             registration_id,
-                            employee_name,
+                            employee_name: sanitizedEmployeeName,
                             course_id,
                             status: RegistrationStatus.ACCEPTED,
                             entity_type: EntityType.EMPLOYEE_COURSE
@@ -169,23 +234,16 @@ export const registerForCourse = async (req: Request, res: Response): Promise<vo
             }
         });
     } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : 'Unknown error occurred';
-        console.error('Error registering for course:', message);
-        res.status(500).json({
-            status: 500,
-            message: "Error registering for course",
-            data: {
-                failure: {
-                    Message: message
-                }
-            }
-        });
+        handleControllerError(error, res, "registering for course");
     }
 };
 
 /**
  * Cancel a course registration
- * POST /cancel/:registration_id
+ * @route DELETE /cancel/:registration_id
+ * @param {Request} req - Express request with registration_id in params
+ * @param {Response} res - Express response
+ * @returns {Promise<void>}
  */
 export const cancelRegistration = async (req: Request, res: Response): Promise<void> => {
     try {
@@ -199,6 +257,20 @@ export const cancelRegistration = async (req: Request, res: Response): Promise<v
                 data: {
                     failure: {
                         Message: "registration_id cannot be empty"
+                    }
+                }
+            });
+            return;
+        }
+
+        // Validate registration ID format
+        if (!isValidRegistrationIdFormat(registration_id)) {
+            res.status(400).json({
+                status: 400,
+                message: "INPUT_DATA_ERROR",
+                data: {
+                    failure: {
+                        Message: `Invalid registration ID format. Expected format: EMPLOYEENAME-OFFERING-COURSENAME-INSTRUCTORNAME. Provided: ${registration_id}`
                     }
                 }
             });
@@ -324,16 +396,6 @@ export const cancelRegistration = async (req: Request, res: Response): Promise<v
             }
         });
     } catch (error: unknown) {
-        const message = error instanceof Error ? error.message : 'Unknown error occurred';
-        console.error('Error canceling registration:', message);
-        res.status(500).json({
-            status: 500,
-            message: "Error canceling registration",
-            data: {
-                failure: {
-                    Message: message
-                }
-            }
-        });
+        handleControllerError(error, res, "canceling registration");
     }
 };

@@ -6,7 +6,7 @@ const router = express.Router();
 // POST /add/courseOffering
 router.post('/add/courseOffering', addCourseOffering);
 
-// POST /allot/:course_id
-router.post('/allot/:course_id', allotCourse);
+// PUT /allot/:course_id (changed from POST to PUT for update operation)
+router.put('/allot/:course_id', allotCourse);
 
 export default router;
