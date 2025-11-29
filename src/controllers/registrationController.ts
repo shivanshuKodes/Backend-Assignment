@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { GetCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, TransactWriteCommand, UpdateCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import ddbDocClient from "../config/dynamoDB";
 import { generateRegistrationId, extractCourseIdFromRegistration } from "../utils/helpers";
 import { RegistrationStatus, CancellationStatus, EntityType } from "../constants/constants";
@@ -397,5 +397,167 @@ export const cancelRegistration = async (req: Request, res: Response): Promise<v
         });
     } catch (error: unknown) {
         handleControllerError(error, res, "canceling registration");
+    }
+};
+
+/**
+ * Get all registered employees for a course
+ * @route GET /registrations/:course_id
+ * @param {Request} req - Express request with course_id in params
+ * @param {Response} res - Express response
+ * @returns {Promise<void>}
+ */
+export const getCourseRegistrations = async (req: Request, res: Response): Promise<void> => {
+    try {
+        const { course_id } = req.params;
+
+        // Validate course ID
+        if (!course_id) {
+            res.status(400).json({
+                status: 400,
+                message: "INPUT_DATA_ERROR",
+                data: {
+                    failure: {
+                        Message: "course_id cannot be empty"
+                    }
+                }
+            });
+            return;
+        }
+
+        // Validate course ID format
+        if (!isValidCourseIdFormat(course_id)) {
+            res.status(400).json({
+                status: 400,
+                message: "INPUT_DATA_ERROR",
+                data: {
+                    failure: {
+                        Message: `Invalid course ID format. Expected format: OFFERING-COURSENAME-INSTRUCTORNAME. Provided: ${course_id}`
+                    }
+                }
+            });
+            return;
+        }
+
+        // Get course metadata
+        const courseResult = await ddbDocClient.send(new GetCommand({
+            TableName: TABLE_NAME,
+            Key: {
+                PK: `COURSE#${course_id}`,
+                SK: "METADATA"
+            }
+        }));
+
+        if (!courseResult.Item) {
+            res.status(404).json({
+                status: 404,
+                message: "Course not found",
+                data: {
+                    failure: {
+                        Message: `Course ${course_id} does not exist`
+                    }
+                }
+            });
+            return;
+        }
+
+        const course = courseResult.Item;
+
+        // Query all registrations for this course
+        const registrationsResult = await ddbDocClient.send(new QueryCommand({
+            TableName: TABLE_NAME,
+            KeyConditionExpression: "PK = :pk AND begins_with(SK, :sk)",
+            ExpressionAttributeValues: {
+                ":pk": `COURSE#${course_id}`,
+                ":sk": "REG#"
+            }
+        }));
+
+        const registrations = registrationsResult.Items || [];
+
+        // Handle course canceled case
+        if (course.course_status === RegistrationStatus.COURSE_CANCELED) {
+            res.status(200).json({
+                status: 200,
+                message: "Course is canceled",
+                data: {
+                    success: {
+                        course_id,
+                        course_status: RegistrationStatus.COURSE_CANCELED,
+                        is_allotted: course.is_allotted || false,
+                        registrations: registrations.map(reg => ({
+                            registration_id: reg.registration_id,
+                            employee_name: reg.employee_name,
+                            email: reg.email,
+                            status: reg.status,
+                            created_at: reg.created_at
+                        }))
+                    }
+                }
+            });
+            return;
+        }
+
+        // Handle no registrations case
+        if (registrations.length === 0) {
+            res.status(200).json({
+                status: 200,
+                message: "No registrations found for this course",
+                data: {
+                    success: {
+                        course_id,
+                        course_status: course.course_status,
+                        is_allotted: course.is_allotted || false,
+                        registrations: []
+                    }
+                }
+            });
+            return;
+        }
+
+        // Handle course allotted case
+        if (course.is_allotted) {
+            res.status(200).json({
+                status: 200,
+                message: "Course is allotted",
+                data: {
+                    success: {
+                        course_id,
+                        course_status: course.course_status,
+                        is_allotted: true,
+                        registrations: registrations.map(reg => ({
+                            registration_id: reg.registration_id,
+                            employee_name: reg.employee_name,
+                            email: reg.email,
+                            status: reg.status,
+                            created_at: reg.created_at
+                        }))
+                    }
+                }
+            });
+            return;
+        }
+
+        // Handle course not allotted case (default)
+        res.status(200).json({
+            status: 200,
+            message: "Course is not allotted yet",
+            data: {
+                success: {
+                    course_id,
+                    course_status: course.course_status,
+                    is_allotted: false,
+                    registrations: registrations.map(reg => ({
+                        registration_id: reg.registration_id,
+                        employee_name: reg.employee_name,
+                        email: reg.email,
+                        status: reg.status,
+                        created_at: reg.created_at
+                    }))
+                }
+            }
+        });
+    } catch (error: unknown) {
+        handleControllerError(error, res, "fetching course registrations");
     }
 };
